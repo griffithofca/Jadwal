@@ -453,7 +453,6 @@ hr{border:0;border-top:1px solid #e6edf7;margin:20px 0}
     <div class="actions">
       <button class="btn secondary" id="openDisplayBtn">📺 Buka Display</button>
       <button class="btn primary" id="openPipBtn">🪟 Open Floating Window</button>
-      <button class="btn soft" id="previewPopupBtn">⚡ Test Popup</button>
     </div>
   </header>
 
@@ -533,7 +532,7 @@ hr{border:0;border-top:1px solid #e6edf7;margin:20px 0}
     <section class="hero-grid" style="margin-top:18px">
       <div class="card pad">
         <div class="section-title">Running Text</div>
-        <div class="muted">Untuk perubahan jadwal atau pengumuman yang berjalan terus.</div>
+        <div class="muted">Teks ini hanya berjalan di floating popup/Picture-in-Picture.</div>
         <textarea id="tickerInput" placeholder="Contoh: Physics kelas 10A pindah ke Lab 2."></textarea>
         <div class="inline-actions">
           <button class="btn primary" id="saveTickerBtn">Publish Running Text</button>
@@ -561,40 +560,29 @@ hr{border:0;border-top:1px solid #e6edf7;margin:20px 0}
       </div>
     </section>
 
-    <section class="card pad quick-popup">
-      <div class="section-title">⚡ Quick Popup</div>
-      <div class="muted">Kirim notifikasi singkat ke layar TV. Cocok untuk perubahan mendadak.</div>
-
-      <div class="popup-types" id="popupTypes">
-        <button class="popup-type active" data-popup-type="info">🔵 Info</button>
-        <button class="popup-type" data-popup-type="reminder">🟡 Reminder</button>
-        <button class="popup-type" data-popup-type="urgent">🔴 Urgent</button>
-      </div>
+    <section class="card pad" style="margin-top:18px">
+      <div class="section-title">☁ Database</div>
+      <div class="muted">Simpan jadwal, guru, template, dan running text online supaya bisa dibuka dari device lain.</div>
 
       <div class="form-grid" style="margin-top:12px">
         <div>
-          <label>Judul Popup</label>
-          <input id="popupTitle" placeholder="Contoh: Perubahan Jadwal">
+          <label>Supabase Project URL</label>
+          <input id="supabaseUrlInput" placeholder="https://xxxxx.supabase.co">
         </div>
         <div>
-          <label>Durasi</label>
-          <select id="popupDuration">
-            <option value="10">10 detik</option>
-            <option value="20" selected>20 detik</option>
-            <option value="30">30 detik</option>
-            <option value="0">Tetap sampai ditutup</option>
-          </select>
+          <label>Supabase Publishable / Anon Key</label>
+          <input id="supabaseKeyInput" type="password" placeholder="sb_publishable_...">
         </div>
       </div>
 
-      <label>Pesan</label>
-      <textarea id="popupMessage" placeholder="Contoh: Physics kelas 10A pindah ke Lab 2 mulai jam 10.40."></textarea>
-
       <div class="inline-actions">
-        <button class="btn primary" id="sendPopupBtn">Kirim Popup ke TV</button>
-        <button class="btn danger" id="closePopupBtn">Tutup Popup Aktif</button>
+        <button class="btn primary" id="connectDbBtn">Connect Database</button>
+        <button class="btn soft" id="pushLocalBtn">Upload Data Device Ini</button>
       </div>
+
+      <div id="dbStatus" class="small" style="margin-top:10px">Belum terhubung ke database.</div>
     </section>
+
   </main>
 </section>
 
@@ -663,25 +651,15 @@ hr{border:0;border-top:1px solid #e6edf7;margin:20px 0}
   <button class="mode-shortcut" id="backAdminBtn">⚙ Admin</button>
 </section>
 
-<!-- POPUP SHARED -->
-<div class="popup-overlay" id="popupOverlay">
-  <div class="tv-popup info" id="tvPopup">
-    <div class="tv-popup-head">
-      <div class="tv-popup-tag" id="popupTag">INFO</div>
-      <button class="btn soft" id="dismissPopupBtn" style="padding:7px 10px">✕</button>
-    </div>
-    <div class="tv-popup-title" id="popupDisplayTitle">Perubahan Jadwal</div>
-    <div class="tv-popup-message" id="popupDisplayMessage">Pesan popup.</div>
-    <div class="tv-popup-time" id="popupDisplayTime">-</div>
-  </div>
-</div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 const STORAGE={
   templates:'school-tv-templates-v10',
   schedule:'school-tv-weekly-v10',
   ticker:'school-tv-ticker-v10',
-  popup:'school-tv-popup-v10'
+  supabaseUrl:'school-tv-supabase-url-v1',
+  supabaseKey:'school-tv-supabase-key-v1'
 };
 
 const DAYS=['Monday','Tuesday','Wednesday','Thursday','Friday'];
@@ -716,23 +694,162 @@ function readJSON(key,fallback){
   try{const v=localStorage.getItem(key);return v?JSON.parse(v):fallback}
   catch(e){return fallback}
 }
-function getTemplates(){return readJSON(STORAGE.templates,DEFAULT_TEMPLATES)}
-function setTemplates(v){localStorage.setItem(STORAGE.templates,JSON.stringify(v));syncAll()}
-function getSchedule(){return readJSON(STORAGE.schedule,{})}
-function setSchedule(v){localStorage.setItem(STORAGE.schedule,JSON.stringify(v));syncAll()}
-function getTicker(){return localStorage.getItem(STORAGE.ticker)||''}
-function setTicker(v){localStorage.setItem(STORAGE.ticker,v||'');syncAll()}
-function getPopup(){return readJSON(STORAGE.popup,null)}
-function setPopup(v){
-  if(v===null)localStorage.removeItem(STORAGE.popup);
-  else localStorage.setItem(STORAGE.popup,JSON.stringify(v));
-  syncAll();
+
+let stateCache={
+  templates:readJSON(STORAGE.templates,DEFAULT_TEMPLATES),
+  schedule:readJSON(STORAGE.schedule,{}),
+  ticker:localStorage.getItem(STORAGE.ticker)||''
+};
+
+let supabaseClient=null;
+let realtimeChannel=null;
+let remoteSaveTimer=null;
+
+function getTemplates(){return stateCache.templates}
+function getSchedule(){return stateCache.schedule}
+function getTicker(){return stateCache.ticker||''}
+
+function persistLocalCache(){
+  localStorage.setItem(STORAGE.templates,JSON.stringify(stateCache.templates));
+  localStorage.setItem(STORAGE.schedule,JSON.stringify(stateCache.schedule));
+  localStorage.setItem(STORAGE.ticker,stateCache.ticker||'');
 }
+
+function scheduleRemoteSave(){
+  if(!supabaseClient) return;
+  if(remoteSaveTimer) clearTimeout(remoteSaveTimer);
+  remoteSaveTimer=setTimeout(saveStateToDatabase,250);
+}
+
+function setTemplates(v){
+  stateCache.templates=Array.isArray(v)?v:[];
+  persistLocalCache();syncAll();scheduleRemoteSave();
+}
+function setSchedule(v){
+  stateCache.schedule=(v&&typeof v==='object')?v:{};
+  persistLocalCache();syncAll();scheduleRemoteSave();
+}
+function setTicker(v){
+  stateCache.ticker=String(v||'');
+  persistLocalCache();syncAll();scheduleRemoteSave();
+}
+
 function syncAll(){
-  try{new BroadcastChannel('school-tv-v10').postMessage('update')}catch(e){}
+  try{new BroadcastChannel('school-tv-v11').postMessage('update')}catch(e){}
   renderAdmin();
   renderDisplay();
-  renderPopup();
+}
+
+function hasMeaningfulLocalData(){
+  const scheduleKeys=Object.keys(stateCache.schedule||{});
+  const nonDefaultTemplates=JSON.stringify(stateCache.templates)!==JSON.stringify(DEFAULT_TEMPLATES);
+  return scheduleKeys.length>0 || nonDefaultTemplates || Boolean((stateCache.ticker||'').trim());
+}
+
+function hasMeaningfulRemoteData(row){
+  if(!row) return false;
+  const templates=Array.isArray(row.templates)?row.templates:[];
+  const schedule=(row.schedule&&typeof row.schedule==='object')?row.schedule:{};
+  return templates.length>0 || Object.keys(schedule).length>0 || Boolean((row.running_text||'').trim());
+}
+
+function setDbStatus(text,kind=''){
+  const el=document.getElementById('dbStatus');
+  if(!el) return;
+  el.textContent=text;
+  el.style.color=kind==='ok'?'#16a34a':kind==='error'?'#dc2626':'';
+}
+
+async function saveStateToDatabase(){
+  if(!supabaseClient) return;
+  const payload={
+    id:1,
+    templates:stateCache.templates,
+    schedule:stateCache.schedule,
+    running_text:stateCache.ticker||'',
+    updated_at:new Date().toISOString()
+  };
+  const {error}=await supabaseClient
+    .from('school_tv_state')
+    .update(payload)
+    .eq('id',1);
+
+  if(error){
+    console.error(error);
+    setDbStatus('Database error: '+error.message,'error');
+  }else{
+    setDbStatus('Tersimpan ke database • '+new Date().toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'}),'ok');
+  }
+}
+
+function applyRemoteState(row){
+  if(!row) return;
+  stateCache.templates=Array.isArray(row.templates)&&row.templates.length?row.templates:DEFAULT_TEMPLATES;
+  stateCache.schedule=(row.schedule&&typeof row.schedule==='object')?row.schedule:{};
+  stateCache.ticker=String(row.running_text||'');
+  persistLocalCache();
+  renderAdmin();
+  renderDisplay();
+}
+
+async function subscribeRealtime(){
+  if(!supabaseClient) return;
+  if(realtimeChannel){
+    try{await supabaseClient.removeChannel(realtimeChannel)}catch(e){}
+  }
+  realtimeChannel=supabaseClient
+    .channel('school-tv-state-live')
+    .on('postgres_changes',{
+      event:'UPDATE',
+      schema:'public',
+      table:'school_tv_state',
+      filter:'id=eq.1'
+    },payload=>applyRemoteState(payload.new))
+    .subscribe();
+}
+
+async function connectDatabase({forcePush=false}={}){
+  const url=(document.getElementById('supabaseUrlInput')?.value||localStorage.getItem(STORAGE.supabaseUrl)||'').trim();
+  const key=(document.getElementById('supabaseKeyInput')?.value||localStorage.getItem(STORAGE.supabaseKey)||'').trim();
+
+  if(!url||!key){
+    setDbStatus('Masukkan Project URL dan Publishable/Anon Key dulu.','error');
+    return;
+  }
+
+  localStorage.setItem(STORAGE.supabaseUrl,url);
+  localStorage.setItem(STORAGE.supabaseKey,key);
+
+  try{
+    supabaseClient=window.supabase.createClient(url,key);
+
+    const {data,error}=await supabaseClient
+      .from('school_tv_state')
+      .select('*')
+      .eq('id',1)
+      .single();
+
+    if(error) throw error;
+
+    if(forcePush){
+      await saveStateToDatabase();
+    }else if(hasMeaningfulRemoteData(data)){
+      applyRemoteState(data);
+      setDbStatus('Terhubung • data database dimuat.','ok');
+    }else if(hasMeaningfulLocalData()){
+      await saveStateToDatabase();
+      setDbStatus('Terhubung • data device lama otomatis di-upload.','ok');
+    }else{
+      applyRemoteState(data);
+      setDbStatus('Terhubung ke database.','ok');
+    }
+
+    await subscribeRealtime();
+  }catch(e){
+    console.error(e);
+    supabaseClient=null;
+    setDbStatus('Gagal terhubung: '+(e?.message||e),'error');
+  }
 }
 function parseTime(t){const [h,m]=t.split(':').map(Number);return h*60+m}
 function sortedDay(day){
@@ -762,7 +879,6 @@ window.addEventListener('hashchange',()=>{
 
 /* ADMIN */
 let selectedDay='Monday';
-let selectedPopupType='info';
 
 const dayTabs=document.getElementById('dayTabs');
 const slotSelect=document.getElementById('slotSelect');
@@ -943,31 +1059,6 @@ document.getElementById('addTemplateBtn').addEventListener('click',()=>{
   document.getElementById('templateTeacher').value='';
 });
 
-document.querySelectorAll('.popup-type').forEach(btn=>{
-  btn.addEventListener('click',()=>{
-    document.querySelectorAll('.popup-type').forEach(x=>x.classList.remove('active'));
-    btn.classList.add('active');
-    selectedPopupType=btn.dataset.popupType;
-  });
-});
-
-function sendPopup(test=false){
-  const title=(test?'Test Popup':document.getElementById('popupTitle').value.trim()) || 'School Update';
-  const message=(test?'Ini contoh popup yang akan muncul di TV.':document.getElementById('popupMessage').value.trim());
-  if(!message){alertBox('Isi pesan popup dulu.');return}
-  const duration=test?8:Number(document.getElementById('popupDuration').value);
-  setPopup({
-    id:Date.now(),
-    type:test?'info':selectedPopupType,
-    title,
-    message,
-    duration,
-    createdAt:Date.now()
-  });
-}
-document.getElementById('sendPopupBtn').addEventListener('click',()=>sendPopup(false));
-document.getElementById('previewPopupBtn').addEventListener('click',()=>sendPopup(true));
-document.getElementById('closePopupBtn').addEventListener('click',()=>setPopup(null));
 
 function renderAdmin(){
   renderDayTabs();
@@ -1070,44 +1161,6 @@ function renderDisplay(){
     ticker?'📢 '+ticker:'📢 Selamat datang di sekolah • Semoga harimu menyenangkan!';
 }
 
-/* POPUP DISPLAY */
-let popupTimer=null;
-let lastPopupId=null;
-function renderPopup(){
-  const overlay=document.getElementById('popupOverlay');
-  const popup=getPopup();
-
-  if(popupTimer){clearTimeout(popupTimer);popupTimer=null}
-
-  if(!popup){
-    overlay.classList.remove('show');
-    return;
-  }
-
-  const now=Date.now();
-  if(popup.duration>0 && now > popup.createdAt + popup.duration*1000){
-    setPopup(null);return;
-  }
-
-  if(lastPopupId!==popup.id) lastPopupId=popup.id;
-
-  const box=document.getElementById('tvPopup');
-  box.className='tv-popup '+popup.type;
-  document.getElementById('popupTag').textContent=
-    popup.type==='urgent'?'URGENT':popup.type==='reminder'?'REMINDER':'INFO';
-  document.getElementById('popupDisplayTitle').textContent=popup.title;
-  document.getElementById('popupDisplayMessage').textContent=popup.message;
-  document.getElementById('popupDisplayTime').textContent=
-    new Date(popup.createdAt).toLocaleTimeString('id-ID',{hour:'2-digit',minute:'2-digit'});
-
-  overlay.classList.add('show');
-
-  if(popup.duration>0){
-    const remain=Math.max(0,popup.createdAt+popup.duration*1000-Date.now());
-    popupTimer=setTimeout(()=>setPopup(null),remain);
-  }
-}
-document.getElementById('dismissPopupBtn').addEventListener('click',()=>setPopup(null));
 
 
 /* FLOATING DISPLAY CONTROLS */
@@ -1168,24 +1221,46 @@ floatDragbar.addEventListener('pointerup',(e)=>{
 
 
 /* SYNC + SHORTCUTS */
-window.addEventListener('storage',()=>{renderAdmin();renderDisplay();renderPopup()});
+window.addEventListener('storage',()=>{renderAdmin();renderDisplay()});
 try{
-  const bc=new BroadcastChannel('school-tv-v10');
-  bc.onmessage=()=>{renderAdmin();renderDisplay();renderPopup()}
+  const bc=new BroadcastChannel('school-tv-v11');
+  bc.onmessage=()=>{renderAdmin();renderDisplay()}
 }catch(e){}
 
 document.addEventListener('keydown',e=>{
   if(e.altKey && e.key.toLowerCase()==='d'){e.preventDefault();showMode('display')}
   if(e.altKey && e.key.toLowerCase()==='a'){e.preventDefault();showMode('admin')}
-  if(e.altKey && e.key.toLowerCase()==='p'){e.preventDefault();sendPopup(true)}
+  
 });
+
+
+/* DATABASE CONTROLS */
+const supabaseUrlInput=document.getElementById('supabaseUrlInput');
+const supabaseKeyInput=document.getElementById('supabaseKeyInput');
+if(supabaseUrlInput) supabaseUrlInput.value=localStorage.getItem(STORAGE.supabaseUrl)||'';
+if(supabaseKeyInput) supabaseKeyInput.value=localStorage.getItem(STORAGE.supabaseKey)||'';
+
+const connectDbBtn=document.getElementById('connectDbBtn');
+if(connectDbBtn) connectDbBtn.addEventListener('click',()=>connectDatabase());
+
+const pushLocalBtn=document.getElementById('pushLocalBtn');
+if(pushLocalBtn) pushLocalBtn.addEventListener('click',()=>{
+  if(!confirm('Upload data dari device ini dan timpa data database?')) return;
+  connectDatabase({forcePush:true});
+});
+
+// Auto-connect on page load if credentials were saved on this device.
+if(localStorage.getItem(STORAGE.supabaseUrl)&&localStorage.getItem(STORAGE.supabaseKey)){
+  setTimeout(()=>connectDatabase(),200);
+}
+
 
 setInterval(renderDisplay,1000);
 
 const initialMode=location.hash.replace('#','')==='display'?'display':'admin';
 renderAdmin();
 renderDisplay();
-renderPopup();
+
 showMode(initialMode);
 
 
